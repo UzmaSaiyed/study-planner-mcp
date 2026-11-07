@@ -1,5 +1,10 @@
+import hashlib
+import json
 import logging
+import os
+import secrets
 import sys
+import time
 from datetime import date, timedelta
 from typing import Annotated, Any, Literal
 
@@ -11,6 +16,7 @@ from pydantic import Field
 from db import init_db, run_query
 
 MAX_TEXT = 2000
+CONFIRM_TTL_SECONDS = 120
 
 logging.basicConfig(
     stream=sys.stderr,
@@ -32,6 +38,47 @@ mcp = MCPServer(
 
 def summary(row: dict[str, Any]) -> dict[str, Any]:
     return {k: row[k] for k in ("id", "title", "subject", "status", "due_on")}
+
+def read_only() -> bool:
+    return os.getenv("READ_ONLY", "true").lower() != "false"
+
+
+_pending: dict[str, dict[str, Any]] = {}
+
+
+def fingerprint(action: str, params: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps([action, params], sort_keys=True).encode()).hexdigest()
+
+
+def confirmation_step(
+    action: str, params: dict[str, Any], preview: str, confirm_code: str | None
+) -> dict[str, Any] | None:
+    """Return a preview until the call is repeated with the right code, then return None."""
+    if read_only():
+        raise ToolError("The server is in read-only mode. Set READ_ONLY=false to allow changes.")
+
+    now = time.time()
+    for code in [c for c, p in _pending.items() if p["expires"] < now]:
+        del _pending[code]
+
+    fp = fingerprint(action, params)
+    if confirm_code:
+        pending = _pending.pop(confirm_code, None)
+        if pending and pending["fingerprint"] == fp:
+            return None
+        raise ToolError("Confirmation code is invalid, expired, or does not match this request.")
+
+    code = secrets.token_hex(3)
+    _pending[code] = {"fingerprint": fp, "expires": now + CONFIRM_TTL_SECONDS}
+    log.info("confirmation requested for %s", action)
+    return {
+        "status": "confirmation_required",
+        "preview": preview,
+        "confirm_code": code,
+        "expires_in_seconds": CONFIRM_TTL_SECONDS,
+        "next_step": "Show this preview to the user. Only if they approve, call the same tool "
+        "again with the same arguments plus this confirm_code.",
+    }
 
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
