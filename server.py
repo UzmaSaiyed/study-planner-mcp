@@ -13,7 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from db import init_db, run_query
+from db import init_db, run_query, run_write
 
 MAX_TEXT = 2000
 CONFIRM_TTL_SECONDS = 120
@@ -26,6 +26,10 @@ logging.basicConfig(
 log = logging.getLogger("study-planner")
 
 Status = Literal["Todo", "In progress", "Done"]
+IsoDate = Annotated[
+    str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="Date as YYYY-MM-DD")
+]
+
 
 mcp = MCPServer(
     "study-planner",
@@ -38,6 +42,14 @@ mcp = MCPServer(
 
 def summary(row: dict[str, Any]) -> dict[str, Any]:
     return {k: row[k] for k in ("id", "title", "subject", "status", "due_on")}
+
+def check_date(value: str | None) -> None:
+    if value:
+        try:
+            date.fromisoformat(value)
+        except ValueError:
+            raise ToolError(f"{value} is not a real date. Use YYYY-MM-DD.") from None
+        
 
 def read_only() -> bool:
     return os.getenv("READ_ONLY", "true").lower() != "false"
@@ -130,6 +142,57 @@ def list_due_soon(
         (cutoff,),
     )
     return [summary(r) for r in rows]
+
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False))
+def add_task(
+    title: Annotated[str, Field(min_length=1, max_length=100)],
+    subject: Annotated[str, Field(min_length=1, max_length=100)],
+    due_on: IsoDate | None = None,
+    notes: Annotated[str, Field(max_length=MAX_TEXT)] = "",
+    confirm_code: str | None = None,
+) -> dict[str, Any]:
+    """Add a new study task with status Todo. This changes data, so it takes two
+    calls: the first returns a preview and a confirm_code, and after the user
+    approves, call again with the same arguments plus that confirm_code."""
+    check_date(due_on)
+    params = {"title": title, "subject": subject, "due_on": due_on, "notes": notes}
+    step = confirmation_step(
+        "add_task", params, f"Add task '{title}' for {subject}, due {due_on or 'no date'}.", confirm_code
+    )
+    if step:
+        return step
+    new_id = run_write(
+        "INSERT INTO tasks (title, subject, due_on, notes) VALUES (?, ?, ?, ?)",
+        (title, subject, due_on, notes),
+    )
+    log.info("added task id=%s", new_id)
+    return {"status": "done", "task_id": new_id}
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True)
+)
+def mark_task_done(task_id: int, confirm_code: str | None = None) -> dict[str, Any]:
+    """Mark an existing study task as Done. This changes data, so it takes two
+    calls: the first returns a preview and a confirm_code, and after the user
+    approves, call again with the same arguments plus that confirm_code."""
+    rows = run_query("SELECT title, status FROM tasks WHERE id = ?", (task_id,))
+    if not rows:
+        raise ToolError(f"No task with id {task_id}.")
+    current = rows[0]
+    if current["status"] == "Done":
+        raise ToolError(f"Task {task_id} is already Done.")
+    step = confirmation_step(
+        "mark_task_done",
+        {"task_id": task_id},
+        f"Mark '{current['title']}' as Done (currently {current['status']}).",
+        confirm_code,
+    )
+    if step:
+        return step
+    run_write("UPDATE tasks SET status = 'Done' WHERE id = ?", (task_id,))
+    log.info("marked task id=%s done", task_id)
+    return {"status": "done", "task_id": task_id}
 
 
 
