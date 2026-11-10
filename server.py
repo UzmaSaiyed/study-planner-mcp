@@ -121,22 +121,29 @@ def search_tasks(
     status: Status | None = None,
     limit: Annotated[int, Field(ge=1, le=20)] = 10,
 ) -> list[dict[str, Any]]:
-    """Search the user's study tasks by title, subject or notes, optionally
-    filtered by status (Todo, In progress or Done). Use this first to find a
-    task id. Returns short summaries, newest first."""
+    """Search the user's study tasks. Every word in the query must appear in the
+    title, subject or notes (case-insensitive), in any order. Optionally filter
+    by status (Todo, In progress or Done). Use this first to find a task id.
+    Returns short summaries, newest first."""
     check_rate_limit()
-
     log.info("search_tasks query=%r status=%s", query, status)
-    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    pattern = f"%{escaped}%"
+    conditions = []
+    params: list[Any] = []
+    for term in query.split()[:5]:
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        conditions.append(
+            "(title LIKE ? ESCAPE '\\' OR subject LIKE ? ESCAPE '\\' OR notes LIKE ? ESCAPE '\\')"
+        )
+        params += [pattern, pattern, pattern]
+    conditions.append("(? IS NULL OR status = ?)")
+    params += [status, status, limit]
     rows = run_query(
-        """SELECT * FROM tasks
-           WHERE (title LIKE ? ESCAPE '\\' OR subject LIKE ? ESCAPE '\\' OR notes LIKE ? ESCAPE '\\')
-             AND (? IS NULL OR status = ?)
-           ORDER BY id DESC LIMIT ?""",
-        (pattern, pattern, pattern, status, status, limit),
+        "SELECT * FROM tasks WHERE " + " AND ".join(conditions) + " ORDER BY id DESC LIMIT ?",
+        tuple(params),
     )
     return [summary(r) for r in rows]
+
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 def get_task(task_id: int) -> dict[str, Any]:

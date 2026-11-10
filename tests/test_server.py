@@ -63,6 +63,12 @@ def test_read_tools_return_expected_data(tmp_path):
         async with make_client(tmp_path) as client:
             found = await client.call_tool("search_tasks", {"query": "viva"})
             assert len(found.structured_content["result"]) == 1
+            words = await client.call_tool("search_tasks", {"query": "database normalization"})
+            assert len(words.structured_content["result"]) == 1
+            reversed_words = await client.call_tool("search_tasks", {"query": "NORMALIZATION Database"})
+            assert len(reversed_words.structured_content["result"]) == 1
+            none = await client.call_tool("search_tasks", {"query": "database astronomy"})
+            assert none.structured_content["result"] == []
 
             detail = await client.call_tool("get_task", {"task_id": 1})
             assert "Revise normalization" in text_of(detail)
