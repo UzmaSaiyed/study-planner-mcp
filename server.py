@@ -8,7 +8,7 @@ import time
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
-
+from collections import deque
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -99,6 +99,21 @@ def confirmation_step(
         "again with the same arguments plus this confirm_code.",
     }
 
+_calls: deque[float] = deque()
+
+
+def rate_limit_per_minute() -> int:
+    return int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
+
+
+def check_rate_limit() -> None:
+    now = time.time()
+    while _calls and _calls[0] < now - 60:
+        _calls.popleft()
+    if len(_calls) >= rate_limit_per_minute():
+        log.warning("rate limit reached")
+        raise ToolError("Too many requests. Wait a minute and try again.")
+    _calls.append(now)
 
 @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
 def search_tasks(
@@ -109,6 +124,8 @@ def search_tasks(
     """Search the user's study tasks by title, subject or notes, optionally
     filtered by status (Todo, In progress or Done). Use this first to find a
     task id. Returns short summaries, newest first."""
+    check_rate_limit()
+
     log.info("search_tasks query=%r status=%s", query, status)
     escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     pattern = f"%{escaped}%"
