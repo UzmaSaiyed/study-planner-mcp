@@ -181,5 +181,7 @@ def test_resource_and_prompt(tmp_path):
             prompts = (await client.list_prompts()).prompts
             assert [p.name for p in prompts] == ["weekly_revision_plan"]
             prompt = await client.get_prompt("weekly_revision_plan", {"days": "5"})
-            assert "within_days=5" in prompt.messages[0].content.text
+            text = prompt.messages[0].content.text
+            assert "within_days=5" in text
+            assert "Database Systems: 2026-11-20" in text
     run(go())
